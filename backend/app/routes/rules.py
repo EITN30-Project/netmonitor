@@ -30,7 +30,7 @@ def list_rules(db: Session = Depends(get_db)):
 
 @router.post("/rules")
 def create_rule(rule: RuleCreate, db: Session = Depends(get_db)):
-    db_rule = models.Rule(**rule.dict())
+    db_rule = models.Rule(**rule.model_dump())
     db.add(db_rule)
     db.commit()
     db.refresh(db_rule)
