@@ -6,3 +6,5 @@
 
 
 ** Convert the unit for throughput to kbps instead of mbps.
+
+** I wonder if we can generate traffic to simulate throughput.
