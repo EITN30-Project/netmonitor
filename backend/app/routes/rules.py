@@ -40,6 +40,13 @@ def create_rule(rule: RuleCreate, db: Session = Depends(get_db)):
 def delete_rule(rule_id: int, db: Session = Depends(get_db)):
     rule = db.get(models.Rule, rule_id)
     if rule:
+        try:
+            firewall.delete_rule(rule)
+        except firewall.FirewallError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except Exception as exc:
+            print(f"Error deleting rule: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to delete rule")
         db.delete(rule)
         db.commit()
     return {"ok": True}
