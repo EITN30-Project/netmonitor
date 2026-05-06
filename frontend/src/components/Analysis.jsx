@@ -23,6 +23,7 @@ const formatTime = (iso) => {
 
 export default function Analysis() {
   const [points, setPoints] = useState([]);
+  const [staticPlots, setStaticPlots] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -33,6 +34,7 @@ export default function Analysis() {
         const data = await getAnalysisMetrics(180);
         if (cancelled) return;
         setPoints(Array.isArray(data?.points) ? data.points : []);
+        setStaticPlots((prev) => prev ?? data?.static_plots ?? null);
         setError("");
       } catch (e) {
         if (cancelled) return;
@@ -52,10 +54,13 @@ export default function Analysis() {
     return (points || []).map((p) => ({
       ...p,
       t: formatTime(p.ts),
-      throughput_mbps: p.throughput_mbps ?? null,
+      throughput_kbps: p.throughput_kbps ?? null,
       latency_ms: p.latency_ms ?? null
     }));
   }, [points]);
+
+  const latencyVsInput = staticPlots?.latency_vs_input || [];
+  const outputVsInput = staticPlots?.output_vs_input || [];
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white p-6">
@@ -80,7 +85,7 @@ export default function Analysis() {
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
           <div className="bg-gray-800 rounded-2xl p-4 shadow">
             <div className="flex items-baseline justify-between mb-3">
-              <h2 className="text-lg font-semibold">Throughput (Mbps)</h2>
+              <h2 className="text-lg font-semibold">Throughput (kbps)</h2>
               <span className="text-xs text-gray-400">last {data.length} samples</span>
             </div>
             <div className="h-72">
@@ -96,7 +101,7 @@ export default function Analysis() {
                   />
                   <Line
                     type="monotone"
-                    dataKey="throughput_mbps"
+                    dataKey="throughput_kbps"
                     stroke="#60A5FA"
                     strokeWidth={2}
                     dot={false}
@@ -134,6 +139,90 @@ export default function Analysis() {
                     dot={false}
                     isAnimationActive
                     animationDuration={450}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </motion.div>
+      </div>
+
+      {/* TODO: */}
+
+      <p className="text-gray-400 mb-2 mt-6">
+        Static plots showing performance measurements from mobile to base station (Before Firewall).
+      </p>
+
+      <div className="mt-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+          <div className="bg-gray-800 rounded-2xl p-4 shadow">
+            <div className="flex items-baseline justify-between mb-3">
+              <h2 className="text-lg font-semibold">Latency vs Input Throughput</h2>
+              <span className="text-xs text-gray-400">static</span>
+            </div>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={latencyVsInput} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis
+                    dataKey="input_kbps"
+                    type="number"
+                    domain={["dataMin", "dataMax"]}
+                    tick={{ fill: "#9CA3AF", fontSize: 12 }}
+                    tickFormatter={(v) => `${v} kbps`}
+                  />
+                  <YAxis tick={{ fill: "#9CA3AF", fontSize: 12 }} width={48} />
+                  <Tooltip
+                    contentStyle={{ background: "#111827", border: "1px solid #374151" }}
+                    labelStyle={{ color: "#E5E7EB" }}
+                    itemStyle={{ color: "#E5E7EB" }}
+                    labelFormatter={(v) => `Input: ${v} kbps`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="latency_ms"
+                    stroke="#34D399"
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </motion.div>
+
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+          <div className="bg-gray-800 rounded-2xl p-4 shadow">
+            <div className="flex items-baseline justify-between mb-3">
+              <h2 className="text-lg font-semibold">Output Throughput vs Input Throughput</h2>
+              <span className="text-xs text-gray-400">static</span>
+            </div>
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={outputVsInput} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis
+                    dataKey="input_kbps"
+                    type="number"
+                    domain={["dataMin", "dataMax"]}
+                    tick={{ fill: "#9CA3AF", fontSize: 12 }}
+                    tickFormatter={(v) => `${v} kbps`}
+                  />
+                  <YAxis tick={{ fill: "#9CA3AF", fontSize: 12 }} width={48} />
+                  <Tooltip
+                    contentStyle={{ background: "#111827", border: "1px solid #374151" }}
+                    labelStyle={{ color: "#E5E7EB" }}
+                    itemStyle={{ color: "#E5E7EB" }}
+                    labelFormatter={(v) => `Input: ${v} kbps`}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="output_kbps"
+                    stroke="#60A5FA"
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
                   />
                 </LineChart>
               </ResponsiveContainer>
