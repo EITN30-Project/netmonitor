@@ -1,7 +1,10 @@
+import json
 import os
 import shlex
+import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Optional
 
 
 class FirewallError(RuntimeError):
@@ -124,11 +127,24 @@ def _run_remote(client, args):
             "Remote firewall command failed. Ensure nftables is installed on the Raspberry Pi and the SSH user has permission to run nft. "
             f"({message})"
         )
+    return out, err, exit_code
 
 
 def _build_add_rule_args(rule):
     action = "accept" if rule.action == "allow" else "drop"
-    return [
+
+    def _nft_string_literal(value: str) -> str:
+        # nft expects quoted strings in its rule syntax (e.g. comment "a b").
+        # Passing a single argv token that contains spaces is not sufficient because
+        # nft re-parses the command line into its own lexer.
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    raw_comment = f"netmonitor rule_id={getattr(rule, 'id', 'unknown')} ip={rule.ip}"
+    comment = _nft_string_literal(raw_comment)
+
+    args = [
+        "sudo",
         "nft",
         "add",
         "rule",
@@ -138,20 +154,123 @@ def _build_add_rule_args(rule):
         "ip",
         "saddr",
         rule.ip,
-        action,
     ]
+
+    # Optional port match (TCP). The UI already captures `port`, so honoring it here
+    # prevents surprises when users enter a port.
+    port = getattr(rule, "port", "") or ""
+    if str(port).strip():
+        args.extend(["tcp", "dport", str(port).strip()])
+
+    args.extend(["counter", "comment", comment, action])
+    return args
 
 
 def _build_flush_chain_args():
-    return ["nft", "flush", "chain", "inet", "myfw", "input"]
+    # TODO: after flushing, reset all rules to applied = false.
+    return ["sudo", "nft", "flush", "chain", "inet", "myfw", "input"]
+
+
+def _nft_list_table_with_handles(client) -> dict[str, Any]:
+    out, _, _ = _run_remote(client, ["sudo", "nft", "-j", "-a", "list", "table", "inet", "myfw"])
+    if not out:
+        return {}
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise FirewallCommandError(
+            "Remote firewall returned invalid JSON for `nft -j -a list table`."
+        ) from exc
+
+
+def _expr_comment(expr: Any) -> Optional[str]:
+    if not isinstance(expr, dict):
+        return None
+    if "comment" in expr and isinstance(expr["comment"], str):
+        return expr["comment"]
+    return None
+
+
+def _expr_matches_ip(expr: Any, ip: str) -> bool:
+    # Matches expressions like:
+    # {"match": {"left": {"payload": {"protocol": "ip", "field": "saddr"}}, "op": "==", "right": "1.2.3.4"}}
+    if not isinstance(expr, dict) or "match" not in expr:
+        return False
+    match = expr.get("match")
+    if not isinstance(match, dict):
+        return False
+    right = match.get("right")
+    if right != ip:
+        return False
+    left = match.get("left")
+    if not isinstance(left, dict) or "payload" not in left:
+        return False
+    payload = left.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("protocol") == "ip" and payload.get("field") == "saddr"
+
+
+def _find_handle_for_rule(nft_json: dict[str, Any], rule) -> Optional[int]:
+    if not nft_json:
+        return None
+
+    wanted_comment = f"netmonitor rule_id={getattr(rule, 'id', 'unknown')} ip={rule.ip}"
+    wanted_ip = getattr(rule, "ip", None)
+
+    items = nft_json.get("nftables")
+    if not isinstance(items, list):
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or "rule" not in item:
+            continue
+        r = item.get("rule")
+        if not isinstance(r, dict):
+            continue
+        if r.get("family") != "inet" or r.get("table") != "myfw" or r.get("chain") != "input":
+            continue
+        candidates.append(r)
+
+    # 1) Prefer exact comment match (reliable even with duplicate IPs).
+    for r in candidates:
+        expr = r.get("expr")
+        if not isinstance(expr, list):
+            continue
+        for e in expr:
+            if _expr_comment(e) == wanted_comment:
+                handle = r.get("handle")
+                return int(handle) if isinstance(handle, int) else None
+
+    # 2) Fallback to matching by IP (best-effort).
+    if wanted_ip:
+        for r in candidates:
+            expr = r.get("expr")
+            if not isinstance(expr, list):
+                continue
+            if any(_expr_matches_ip(e, wanted_ip) for e in expr):
+                handle = r.get("handle")
+                return int(handle) if isinstance(handle, int) else None
+
+    return None
+
+
+def _apply_rule_in_session(client, rule) -> None:
+    _run_remote(client, _build_add_rule_args(rule))
+
+    # `nft add rule` doesn't consistently print the handle; explicitly list the table with handles.
+    nft_json = _nft_list_table_with_handles(client)
+    handle = _find_handle_for_rule(nft_json, rule)
+    if handle is not None:
+        rule.handle = handle
+    rule.applied = True
 
 
 def apply_rule(rule):
     """Apply a single rule on the Raspberry Pi via SSH."""
-
     with _ssh_client() as client:
-        _run_remote(client, _build_add_rule_args(rule))
-    rule.applied = True
+        _apply_rule_in_session(client, rule)
 
 
 def flush_rules():
@@ -167,5 +286,43 @@ def apply_rules(rules):
     with _ssh_client() as client:
         _run_remote(client, _build_flush_chain_args())
         for rule in rules:
-            _run_remote(client, _build_add_rule_args(rule))
-            rule.applied = True
+            _apply_rule_in_session(client, rule)
+
+            # Small delay to reduce chance of racing the ruleset listing on slower devices.
+            time.sleep(0.02)
+
+def delete_rule(rule):
+    """Delete a single rule on the Raspberry Pi via SSH."""
+
+    # If the rule was never applied, it won't exist remotely; just delete from DB.
+    if not getattr(rule, "applied", False):
+        return
+
+    with _ssh_client() as client:
+        handle = getattr(rule, "handle", 0) or 0
+        if not handle:
+            nft_json = _nft_list_table_with_handles(client)
+            resolved = _find_handle_for_rule(nft_json, rule)
+            if resolved is not None:
+                handle = resolved
+                rule.handle = resolved
+
+        if not handle:
+            raise FirewallCommandError(
+                "Can't delete rule because its nft handle could not be determined. Try applying the rule again, or ensure the nftables table/chain exists."
+            )
+
+        _run_remote(
+            client,
+            [
+                "sudo",
+                "nft",
+                "delete",
+                "rule",
+                "inet",
+                "myfw",
+                "input",
+                "handle",
+                str(handle),
+            ],
+        )
