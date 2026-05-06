@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Trash2, Shield, Activity } from "lucide-react";
+import { Trash2, Shield, Activity, Loader2 } from "lucide-react";
 import { getRules, addRule, deleteRule, applyRules, applyRule } from "../api";
 
 export default function Dashboard() {
@@ -8,6 +8,7 @@ export default function Dashboard() {
   const [form, setForm] = useState({ ip: "", port: "", action: "allow" });
   const [loading, setLoading] = useState(false);
   const [applyingRuleId, setApplyingRuleId] = useState(null);
+  const [deletingRuleId, setDeletingRuleId] = useState(null);
   const [toasts, setToasts] = useState([]);
 
   const pushToast = (message, type = "error") => {
@@ -44,16 +45,20 @@ export default function Dashboard() {
       await addRule(form);
       setForm({ ip: "", port: "", action: "allow" });
       await load();
+      pushToast("Rule added successfully", "success");
     } catch (err) {
       pushToast(getErrorMessage(err, "Failed to add rule"));
     }
   };
 
   const handleApplyRule = async (ruleId) => {
+    const ok = window.confirm("Apply this rule to the firewall now?");
+    if (!ok) return;
     try {
       setApplyingRuleId(ruleId);
       await applyRule(ruleId);
       await load();
+      pushToast("Rule applied successfully", "success");
     } catch (err) {
       pushToast(getErrorMessage(err, "Failed to apply rule"));
     } finally {
@@ -63,7 +68,7 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 text-white p-6">
-      <div className="fixed top-4 right-4 z-50 space-y-2">
+      <div className="fixed top-16 right-4 z-50 space-y-2">
         {toasts.map((t) => (
           <div
             key={t.id}
@@ -133,6 +138,8 @@ export default function Dashboard() {
           </button>
           <button
             onClick={async () => {
+              const ok = window.confirm("Apply all staged rules to the firewall now?");
+              if (!ok) return;
               setLoading(true);
               try {
                 await applyRules();
@@ -191,16 +198,27 @@ export default function Dashboard() {
 
                 <button
                   onClick={async () => {
+                      const ok = window.confirm("Delete this rule?");
+                      if (!ok) return;
                     try {
+                        setDeletingRuleId(rule.id);
                       await deleteRule(rule.id);
                       await load();
+                        pushToast("Rule deleted successfully", "success");
                     } catch (err) {
                       pushToast(getErrorMessage(err, "Failed to delete rule"));
+                      } finally {
+                        setDeletingRuleId(null);
                     }
                   }}
-                  className="text-red-400 hover:text-red-500"
+                    disabled={deletingRuleId === rule.id}
+                    className="text-red-400 hover:text-red-500 disabled:opacity-60 disabled:hover:text-red-400"
                 >
-                  <Trash2 />
+                    {deletingRuleId === rule.id ? (
+                      <Loader2 className="animate-spin" />
+                    ) : (
+                      <Trash2 />
+                    )}
                 </button>
               </div>
             </div>
