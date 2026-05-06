@@ -7,4 +7,7 @@ class Rule(Base):
     ip = Column(String)
     port = Column(String)
     action = Column(String)
+    packets = Column(Integer, default=0)
+    bytes = Column(Integer, default=0)
+    handle = Column(Integer, default=0)
     applied = Column(Boolean, default=False)
