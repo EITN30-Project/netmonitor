@@ -54,3 +54,8 @@ export const applyRules = async () => {
 export const applyRule = async (id) => {
   await apiFetch(`/rules/${id}/apply`, { method: "POST" });
 };
+
+export const getAnalysisMetrics = async (limit = 180) => {
+  const q = new URLSearchParams({ limit: String(limit) });
+  return apiFetch(`/analysis/metrics?${q.toString()}`);
+};
