@@ -326,3 +326,105 @@ def delete_rule(rule):
                 str(handle),
             ],
         )
+
+
+def _rule_counter(rule_json: dict[str, Any]) -> tuple[int, int]:
+    # Returns (packets, bytes) for a given nft rule JSON.
+    packets = 0
+    bytes_ = 0
+
+    direct = rule_json.get("counter")
+    if isinstance(direct, dict):
+        p = direct.get("packets")
+        b = direct.get("bytes")
+        if isinstance(p, int):
+            packets = p
+        if isinstance(b, int):
+            bytes_ = b
+
+    expr = rule_json.get("expr")
+    if isinstance(expr, list):
+        for e in expr:
+            if not isinstance(e, dict) or "counter" not in e:
+                continue
+            c = e.get("counter")
+            if not isinstance(c, dict):
+                continue
+            p = c.get("packets")
+            b = c.get("bytes")
+            if isinstance(p, int):
+                packets = p
+            if isinstance(b, int):
+                bytes_ = b
+            break
+
+    return packets, bytes_
+
+
+def _rule_verdict_kind(rule_json: dict[str, Any]) -> Optional[str]:
+    expr = rule_json.get("expr")
+    if not isinstance(expr, list):
+        return None
+    for e in expr:
+        if not isinstance(e, dict) or "verdict" not in e:
+            continue
+        v = e.get("verdict")
+        if isinstance(v, dict):
+            kind = v.get("kind")
+            if isinstance(kind, str):
+                return kind
+    return None
+
+
+def get_netmonitor_counters() -> dict[str, int]:
+    """Return aggregated counters for netmonitor rules.
+
+    Uses `nft -j -a list table inet myfw` and sums rule counters.
+    """
+
+    with _ssh_client() as client:
+        nft_json = _nft_list_table_with_handles(client)
+
+    items = nft_json.get("nftables")
+    if not isinstance(items, list):
+        return {"blocked_packets_total": 0, "blocked_bytes_total": 0}
+
+    blocked_packets_total = 0
+    blocked_bytes_total = 0
+
+    for item in items:
+        if not isinstance(item, dict) or "rule" not in item:
+            continue
+        rule = item.get("rule")
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("family") != "inet" or rule.get("table") != "myfw" or rule.get("chain") != "input":
+            continue
+
+        expr = rule.get("expr")
+        if not isinstance(expr, list):
+            continue
+
+        comment = None
+        for e in expr:
+            c = _expr_comment(e)
+            if c:
+                comment = c
+                break
+
+        # Only count rules created by netmonitor.
+        if not (isinstance(comment, str) and comment.startswith("netmonitor ")):
+            continue
+
+        verdict = _rule_verdict_kind(rule)
+        if verdict != "drop":
+            continue
+
+        packets, bytes_ = _rule_counter(rule)
+        blocked_packets_total += int(packets)
+        blocked_bytes_total += int(bytes_)
+
+    return {
+        "blocked_packets_total": blocked_packets_total,
+        "blocked_bytes_total": blocked_bytes_total,
+    }
