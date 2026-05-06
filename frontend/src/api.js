@@ -59,3 +59,7 @@ export const getAnalysisMetrics = async (limit = 180) => {
   const q = new URLSearchParams({ limit: String(limit) });
   return apiFetch(`/analysis/metrics?${q.toString()}`);
 };
+
+export const getDashboardStats = async () => {
+  return apiFetch("/dashboard/stats");
+};
