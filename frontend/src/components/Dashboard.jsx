@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Trash2, Shield, Activity, Loader2 } from "lucide-react";
-import { getRules, addRule, deleteRule, applyRules, applyRule } from "../api";
+import { getRules, addRule, deleteRule, applyRules, applyRule, getDashboardStats } from "../api";
 
 export default function Dashboard() {
   const [rules, setRules] = useState([]);
@@ -9,6 +9,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [applyingRuleId, setApplyingRuleId] = useState(null);
   const [deletingRuleId, setDeletingRuleId] = useState(null);
+  const [stats, setStats] = useState({ blocked_packets_total: null, throughput_kbps: null });
   const [toasts, setToasts] = useState([]);
 
   const pushToast = (message, type = "error") => {
@@ -38,6 +39,38 @@ export default function Dashboard() {
   };
 
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const data = await getDashboardStats();
+        if (cancelled) return;
+        setStats({
+          blocked_packets_total:
+            typeof data?.blocked_packets_total === "number" ? data.blocked_packets_total : null,
+          throughput_kbps:
+            typeof data?.throughput_kbps === "number" ? data.throughput_kbps : null
+        });
+      } catch {
+        if (cancelled) return;
+        setStats({ blocked_packets_total: null, throughput_kbps: null });
+      }
+    };
+
+    tick();
+    const id = window.setInterval(tick, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const formatThroughput = (kbps) => {
+    if (typeof kbps !== "number" || !Number.isFinite(kbps)) return "-- kbps";
+    return `${kbps.toFixed(1)} kbps`;
+  };
 
   const handleAdd = async () => {
     if (!form.ip) return;
@@ -96,8 +129,15 @@ export default function Dashboard() {
       {/* Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         {[{ label: "Staged Rules", value: rules.length, icon: Shield },
-          { label: "Blocked Packets", value: "--", icon: Activity },
-          { label: "Throughput", value: "-- Mbps", icon: Activity }].map((stat, i) => (
+          {
+            label: "Blocked Packets",
+            value:
+              typeof stats.blocked_packets_total === "number"
+                ? String(stats.blocked_packets_total)
+                : "--",
+            icon: Activity
+          },
+          { label: "Throughput", value: formatThroughput(stats.throughput_kbps), icon: Activity }].map((stat, i) => (
           <motion.div key={i} whileHover={{ scale: 1.05 }}>
             <div className="bg-gray-800 rounded-2xl p-4 flex justify-between items-center shadow">
               <div>
