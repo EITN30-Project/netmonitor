@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from .database import Base, engine
-from .routes import rules
+from .routes import analysis, rules
 from fastapi.middleware.cors import CORSMiddleware
+
+from .analysis_metrics import collector
 
 Base.metadata.create_all(bind=engine)
 
@@ -15,3 +17,9 @@ app.add_middleware(
 )
 
 app.include_router(rules.router, prefix="/api")
+app.include_router(analysis.router, prefix="/api")
+
+
+@app.on_event("startup")
+def _start_metrics_collector():
+    collector.start()
