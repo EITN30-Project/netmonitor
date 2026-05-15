@@ -143,8 +143,11 @@ def _ensure_table_and_chain(client) -> None:
     if table_code != 0:
         _run_remote(client, ["sudo", "nft", "add", "table", "inet", "myfw"])
 
-    _, _, chain_code = _run_remote_raw(client, ["sudo", "nft", "list", "chain", "inet", "myfw", "input"])
-    if chain_code != 0:
+    def _ensure_base_chain(chain: str, hook: str) -> None:
+        _, _, chain_code = _run_remote_raw(client, ["sudo", "nft", "list", "chain", "inet", "myfw", chain])
+        if chain_code == 0:
+            return
+
         # Base chain with safe default policy.
         _run_remote(
             client,
@@ -155,12 +158,12 @@ def _ensure_table_and_chain(client) -> None:
                 "chain",
                 "inet",
                 "myfw",
-                "input",
+                chain,
                 "{",
                 "type",
                 "filter",
                 "hook",
-                "input",
+                hook,
                 "priority",
                 "0",
                 ";",
@@ -171,8 +174,11 @@ def _ensure_table_and_chain(client) -> None:
             ],
         )
 
+    _ensure_base_chain("input", "input")
+    _ensure_base_chain("forward", "forward")
 
-def _build_add_rule_args(rule):
+
+def _build_add_rule_args(rule, chain: str = "input") -> list[str]:
     action = "accept" if rule.action == "allow" else "drop"
 
     def _nft_string_literal(value: str) -> str:
@@ -192,7 +198,7 @@ def _build_add_rule_args(rule):
         "rule",
         "inet",
         "myfw",
-        "input",
+        chain,
         "ip",
         "saddr",
         rule.ip,
@@ -210,9 +216,9 @@ def _build_add_rule_args(rule):
     return args
 
 
-def _build_flush_chain_args():
+def _build_flush_chain_args(chain: str = "input"):
     # TODO: after flushing, reset all rules to applied = false.
-    return ["sudo", "nft", "flush", "chain", "inet", "myfw", "input"]
+    return ["sudo", "nft", "flush", "chain", "inet", "myfw", chain]
 
 
 def _nft_list_table_with_handles(client) -> dict[str, Any]:
@@ -256,7 +262,7 @@ def _expr_matches_ip(expr: Any, ip: str) -> bool:
     return payload.get("protocol") == "ip" and payload.get("field") == "saddr"
 
 
-def _find_handle_for_rule(nft_json: dict[str, Any], rule) -> Optional[int]:
+def _find_handle_for_rule(nft_json: dict[str, Any], rule, chain: str = "input") -> Optional[int]:
     if not nft_json:
         return None
 
@@ -274,7 +280,7 @@ def _find_handle_for_rule(nft_json: dict[str, Any], rule) -> Optional[int]:
         r = item.get("rule")
         if not isinstance(r, dict):
             continue
-        if r.get("family") != "inet" or r.get("table") != "myfw" or r.get("chain") != "input":
+        if r.get("family") != "inet" or r.get("table") != "myfw" or r.get("chain") != chain:
             continue
         candidates.append(r)
 
@@ -301,14 +307,74 @@ def _find_handle_for_rule(nft_json: dict[str, Any], rule) -> Optional[int]:
     return None
 
 
+def _find_handles_for_rule(nft_json: dict[str, Any], rule, chain: str) -> list[int]:
+    """Return all matching handles for a rule in a given chain.
+
+    We prefer matching by the netmonitor comment (unique per rule_id+ip),
+    and fall back to matching by source IP.
+    """
+
+    if not nft_json:
+        return []
+
+    wanted_comment = f"netmonitor rule_id={getattr(rule, 'id', 'unknown')} ip={rule.ip}"
+    wanted_ip = getattr(rule, "ip", None)
+
+    items = nft_json.get("nftables")
+    if not isinstance(items, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or "rule" not in item:
+            continue
+        r = item.get("rule")
+        if not isinstance(r, dict):
+            continue
+        if r.get("family") != "inet" or r.get("table") != "myfw" or r.get("chain") != chain:
+            continue
+        candidates.append(r)
+
+    handles: list[int] = []
+
+    # 1) Exact comment matches.
+    for r in candidates:
+        expr = r.get("expr")
+        if not isinstance(expr, list):
+            continue
+        if any(_expr_comment(e) == wanted_comment for e in expr):
+            handle = r.get("handle")
+            if isinstance(handle, int):
+                handles.append(int(handle))
+
+    if handles:
+        return handles
+
+    # 2) Fallback to matching by IP.
+    if wanted_ip:
+        for r in candidates:
+            expr = r.get("expr")
+            if not isinstance(expr, list):
+                continue
+            if any(_expr_matches_ip(e, wanted_ip) for e in expr):
+                handle = r.get("handle")
+                if isinstance(handle, int):
+                    handles.append(int(handle))
+
+    return handles
+
+
 def _apply_rule_in_session(client, rule) -> None:
     _ensure_table_and_chain(client)
-    _run_remote(client, _build_add_rule_args(rule))
+    # apply rule to both input and forward chains to ensure it takes effect regardless of routing. 
+    # This also simplifies rule management since we can use the same handle for deletion.
+    _run_remote(client, _build_add_rule_args(rule, chain="input"))
+    _run_remote(client, _build_add_rule_args(rule, chain="forward"))
 
     # `nft add rule` doesn't consistently print the handle; 
     # explicitly list the table with handles.
     nft_json = _nft_list_table_with_handles(client)
-    handle = _find_handle_for_rule(nft_json, rule)
+    handle = _find_handle_for_rule(nft_json, rule, chain="input")
     if handle is not None:
         rule.handle = handle
     rule.applied = True
@@ -325,7 +391,8 @@ def flush_rules():
 
     with _ssh_client() as client:
         _ensure_table_and_chain(client)
-        _run_remote(client, _build_flush_chain_args())
+        _run_remote(client, _build_flush_chain_args(chain="input"))
+        _run_remote(client, _build_flush_chain_args(chain="forward"))
 
 
 def apply_rules(rules):
@@ -333,7 +400,8 @@ def apply_rules(rules):
 
     with _ssh_client() as client:
         _ensure_table_and_chain(client)
-        _run_remote(client, _build_flush_chain_args())
+        _run_remote(client, _build_flush_chain_args(chain="input"))
+        _run_remote(client, _build_flush_chain_args(chain="forward"))
         for rule in rules:
             _apply_rule_in_session(client, rule)
 
@@ -348,33 +416,48 @@ def delete_rule(rule):
         return
 
     with _ssh_client() as client:
-        handle = getattr(rule, "handle", 0) or 0
-        if not handle:
-            nft_json = _nft_list_table_with_handles(client)
-            resolved = _find_handle_for_rule(nft_json, rule)
-            if resolved is not None:
-                handle = resolved
-                rule.handle = resolved
+        _ensure_table_and_chain(client)
 
-        if not handle:
-            raise FirewallCommandError(
-                "Can't delete rule because its nft handle could not be determined. Try applying the rule again, or ensure the nftables table/chain exists."
-            )
+        nft_json = _nft_list_table_with_handles(client)
+        input_handles = _find_handles_for_rule(nft_json, rule, chain="input")
+        forward_handles = _find_handles_for_rule(nft_json, rule, chain="forward")
+        handles_by_chain: list[tuple[str, list[int]]] = [
+            ("input", input_handles),
+            ("forward", forward_handles),
+        ]
 
-        _run_remote(
-            client,
-            [
-                "sudo",
-                "nft",
-                "delete",
-                "rule",
-                "inet",
-                "myfw",
-                "input",
-                "handle",
-                str(handle),
-            ],
-        )
+        # If the rule isn't present remotely (flush/reboot/etc.), treat delete as a no-op.
+        if not any(handles for _, handles in handles_by_chain):
+            return
+
+        for chain, handles in handles_by_chain:
+            for handle in handles:
+                out, err, code = _run_remote_raw(
+                    client,
+                    [
+                        "sudo",
+                        "nft",
+                        "delete",
+                        "rule",
+                        "inet",
+                        "myfw",
+                        chain,
+                        "handle",
+                        str(handle),
+                    ],
+                )
+                if code == 0:
+                    continue
+
+                message = err or out or f"exit status {code}"
+                if "No such file or directory" in message:
+                    # Rule/chain already absent; treat as successful delete.
+                    continue
+
+                raise FirewallCommandError(
+                    "Remote firewall command failed. Ensure nftables is installed on the Raspberry Pi and the SSH user has permission to run nft. "
+                    f"({message})"
+                )
 
 
 def _rule_counter(rule_json: dict[str, Any]) -> tuple[int, int]:
