@@ -124,8 +124,14 @@ class AnalysisMetricsCollector:
         ]
 
     def _run(self) -> None:
+        # Load backend/.env (if present) so BASE_IP/ANALYSIS_PING_HOST are available.
+        # This keeps the existing 8.8.8.8 fallback but ensures configured values win.
+        firewall._load_env_if_present()
+
         sample_interval = float(os.getenv("ANALYSIS_SAMPLE_INTERVAL", "1"))
         ping_host = os.getenv("ANALYSIS_PING_HOST") or os.getenv("BASE_IP") or "8.8.8.8"
+
+        print(f"Starting analysis metrics collector: sample_interval={sample_interval}s, ping_host={ping_host}")
 
         ssh_client_ctx = None
         ssh_client = None
