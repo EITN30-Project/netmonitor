@@ -115,11 +115,7 @@ def _ssh_client():
 
 
 def _run_remote(client, args):
-    command = " ".join(shlex.quote(str(a)) for a in args)
-    stdin, stdout, stderr = client.exec_command(command)
-    exit_code = stdout.channel.recv_exit_status()
-    out = stdout.read().decode(errors="replace").strip()
-    err = stderr.read().decode(errors="replace").strip()
+    out, err, exit_code = _run_remote_raw(client, args)
 
     if exit_code != 0:
         message = err or out or f"exit status {exit_code}"
@@ -128,6 +124,52 @@ def _run_remote(client, args):
             f"({message})"
         )
     return out, err, exit_code
+
+
+def _run_remote_raw(client, args):
+    command = " ".join(shlex.quote(str(a)) for a in args)
+    stdin, stdout, stderr = client.exec_command(command)
+    exit_code = stdout.channel.recv_exit_status()
+    out = stdout.read().decode(errors="replace").strip()
+    err = stderr.read().decode(errors="replace").strip()
+
+    return out, err, exit_code
+
+
+def _ensure_table_and_chain(client) -> None:
+    # Create the table/chain if they don't exist.
+    # This avoids confusing errors like "No such file or directory" when applying rules.
+    _, _, table_code = _run_remote_raw(client, ["sudo", "nft", "list", "table", "inet", "myfw"])
+    if table_code != 0:
+        _run_remote(client, ["sudo", "nft", "add", "table", "inet", "myfw"])
+
+    _, _, chain_code = _run_remote_raw(client, ["sudo", "nft", "list", "chain", "inet", "myfw", "input"])
+    if chain_code != 0:
+        # Base chain with safe default policy.
+        _run_remote(
+            client,
+            [
+                "sudo",
+                "nft",
+                "add",
+                "chain",
+                "inet",
+                "myfw",
+                "input",
+                "{",
+                "type",
+                "filter",
+                "hook",
+                "input",
+                "priority",
+                "0",
+                ";",
+                "policy",
+                "accept",
+                ";",
+                "}",
+            ],
+        )
 
 
 def _build_add_rule_args(rule):
@@ -162,7 +204,9 @@ def _build_add_rule_args(rule):
     if str(port).strip():
         args.extend(["tcp", "dport", str(port).strip()])
 
-    args.extend(["counter", "comment", comment, action])
+    # nft rule grammar expects the verdict (accept/drop) before trailing modifiers like `comment`.
+    # Putting `comment` last avoids parse errors such as: "unexpected accept".
+    args.extend(["counter", action, "comment", comment])
     return args
 
 
@@ -172,6 +216,7 @@ def _build_flush_chain_args():
 
 
 def _nft_list_table_with_handles(client) -> dict[str, Any]:
+    _ensure_table_and_chain(client)
     out, _, _ = _run_remote(client, ["sudo", "nft", "-j", "-a", "list", "table", "inet", "myfw"])
     if not out:
         return {}
@@ -257,6 +302,7 @@ def _find_handle_for_rule(nft_json: dict[str, Any], rule) -> Optional[int]:
 
 
 def _apply_rule_in_session(client, rule) -> None:
+    _ensure_table_and_chain(client)
     _run_remote(client, _build_add_rule_args(rule))
 
     # `nft add rule` doesn't consistently print the handle; 
@@ -278,6 +324,7 @@ def flush_rules():
     """Flush the target nftables chain on the Raspberry Pi via SSH."""
 
     with _ssh_client() as client:
+        _ensure_table_and_chain(client)
         _run_remote(client, _build_flush_chain_args())
 
 
@@ -285,6 +332,7 @@ def apply_rules(rules):
     """Flush then apply all rules on the Raspberry Pi via SSH (single SSH session)."""
 
     with _ssh_client() as client:
+        _ensure_table_and_chain(client)
         _run_remote(client, _build_flush_chain_args())
         for rule in rules:
             _apply_rule_in_session(client, rule)
