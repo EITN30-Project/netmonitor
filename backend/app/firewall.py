@@ -259,7 +259,8 @@ def _find_handle_for_rule(nft_json: dict[str, Any], rule) -> Optional[int]:
 def _apply_rule_in_session(client, rule) -> None:
     _run_remote(client, _build_add_rule_args(rule))
 
-    # `nft add rule` doesn't consistently print the handle; explicitly list the table with handles.
+    # `nft add rule` doesn't consistently print the handle; 
+    # explicitly list the table with handles.
     nft_json = _nft_list_table_with_handles(client)
     handle = _find_handle_for_rule(nft_json, rule)
     if handle is not None:
